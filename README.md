@@ -57,7 +57,7 @@ Zig 0.16.0.
 Add jev.zig to your `build.zig.zon`:
 
 ```sh
-zig fetch --save git+https://github.com/jakeknowlton/jev.zig
+zig fetch --save git+https://github.com/jakeknowlton/jev.zig#v0.1.0
 ```
 
 Then add the module in `build.zig`:

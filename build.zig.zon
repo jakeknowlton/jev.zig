@@ -1,6 +1,6 @@
 .{
     .name = .jev,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0x1beddc0fabda0100, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
