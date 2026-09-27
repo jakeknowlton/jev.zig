@@ -115,3 +115,7 @@ A call blocks until the server answers or the `Io` cancels it.
 
 Set `client.transport` to a `jev.Client.Transport` of your own to answer
 requests without a network.
+
+## License
+
+[MIT](LICENSE)
