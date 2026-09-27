@@ -128,15 +128,15 @@ pub fn isQuestion(comptime T: type) bool {
 fn checkEnum(comptime E: type, comptime min: usize, comptime max: usize, comptime what: []const u8) void {
     const info = @typeInfo(E);
     if (info != .@"enum" or !info.@"enum".is_exhaustive)
-        @compileError("jev: " ++ what ++ " needs an exhaustive enum, found " ++ @typeName(E));
+        @compileError("jev: " ++ @typeName(E) ++ " must be an exhaustive enum for " ++ what);
     const n = info.@"enum".fields.len;
     if (n < min or n > max)
-        @compileError(std.fmt.comptimePrint("jev: {s} needs {d} to {d} options, {s} has {d}", .{ what, min, max, @typeName(E), n }));
+        @compileError(std.fmt.comptimePrint("jev: {s} has {d} tags but {s} needs {d} to {d}", .{ @typeName(E), n, what, min, max }));
 }
 
 pub fn checkContent(comptime T: type, comptime what: []const u8) void {
     switch (@typeInfo(T)) {
-        .bool, .int, .float, .comptime_int, .comptime_float, .void, .null => @compileError("jev: " ++ what ++ " must be a string, struct, tuple or slice, found " ++ @typeName(T)),
+        .bool, .int, .float, .comptime_int, .comptime_float, .void, .null => @compileError("jev: " ++ what ++ " is a " ++ @typeName(T) ++ " but must be a string, struct, tuple or slice"),
         else => {},
     }
 }
@@ -144,12 +144,12 @@ pub fn checkContent(comptime T: type, comptime what: []const u8) void {
 fn checkDescriptions(comptime E: type, comptime D: type, comptime complete: bool) void {
     const info = @typeInfo(D);
     if (info != .@"struct" or (info.@"struct".is_tuple and info.@"struct".fields.len > 0))
-        @compileError("jev: descriptions must be a struct literal keyed by tags of " ++ @typeName(E));
+        @compileError("jev: descriptions for " ++ @typeName(E) ++ " must be a struct literal keyed by its tags");
     for (info.@"struct".fields) |f| {
-        if (!@hasField(E, f.name)) @compileError("jev: '" ++ f.name ++ "' is not a tag of " ++ @typeName(E));
+        if (!@hasField(E, f.name)) @compileError("jev: " ++ @typeName(E) ++ " has no tag '" ++ f.name ++ "'");
         checkContent(f.type, "description of '" ++ f.name ++ "'");
     }
     if (complete) for (@typeInfo(E).@"enum".fields) |f| {
-        if (!@hasField(D, f.name)) @compileError("jev: score level '" ++ f.name ++ "' of " ++ @typeName(E) ++ " needs a description");
+        if (!@hasField(D, f.name)) @compileError("jev: " ++ @typeName(E) ++ " score level '" ++ f.name ++ "' needs a description");
     };
 }

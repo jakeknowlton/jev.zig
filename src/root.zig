@@ -22,4 +22,5 @@ pub const Usage = answer.Usage;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("wire.zig");
+    _ = @import("transport.zig");
 }

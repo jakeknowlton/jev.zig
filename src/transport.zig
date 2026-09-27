@@ -82,3 +82,56 @@ fn fail(err: anyerror, cause: *?anyerror) Transport.Error {
         },
     };
 }
+
+const testing = std.testing;
+
+test "http transport" {
+    const io = testing.io;
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    var served = try io.concurrent(serveOnce, .{ &listener, io });
+    defer served.cancel(io) catch {};
+
+    var client: std.http.Client = .{ .allocator = testing.allocator, .io = io };
+    defer client.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/v1/systemone", .{listener.socket.address.getPort()});
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var cause: ?anyerror = null;
+    var body = "{\"a\":1}".*;
+    const response = try Transport.http(&client).send(.{ .uri = try std.Uri.parse(url), .authorization = "Bearer k", .body = &body }, &out.writer, &cause);
+    try served.await(io);
+    try testing.expectEqual(.too_many_requests, response.status);
+    try testing.expectEqual(7, response.retry_after_ms);
+    try testing.expectEqualStrings("busy", out.written());
+}
+
+fn serveOnce(listener: *Io.net.Server, io: Io) !void {
+    const stream = try listener.accept(io);
+    defer stream.close(io);
+    var read_buf: [4096]u8 = undefined;
+    var write_buf: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buf);
+    var writer = stream.writer(io, &write_buf);
+    var server: std.http.Server = .init(&reader.interface, &writer.interface);
+    var request = try server.receiveHead();
+    try testing.expectEqual(.POST, request.head.method);
+    try testing.expectEqualStrings("/v1/systemone", request.head.target);
+    var authorized = false;
+    var it = request.iterateHeaders();
+    while (it.next()) |h| if (std.ascii.eqlIgnoreCase(h.name, "authorization")) {
+        try testing.expectEqualStrings("Bearer k", h.value);
+        authorized = true;
+    };
+    try testing.expect(authorized);
+    var transfer_buf: [64]u8 = undefined;
+    var body: [7]u8 = undefined;
+    try request.readerExpectNone(&transfer_buf).readSliceAll(&body);
+    try testing.expectEqualStrings("{\"a\":1}", &body);
+    try request.respond("busy", .{
+        .status = .too_many_requests,
+        .extra_headers = &.{ .{ .name = "retry-after-ms", .value = "7" }, .{ .name = "retry-after", .value = "2" } },
+    });
+}

@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
 ```
 
 A misspelled option, a score with one level, or a field that is not a question
-is a compile error.
+is a compile error. This program is [examples/triage.zig](examples/triage.zig).
 
 ## Requirements
 
