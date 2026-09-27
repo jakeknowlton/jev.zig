@@ -86,6 +86,9 @@ pre-encoded JSON through as is.
 The result owns no memory. `r.usage` and `r.model()` report the token counts
 and the model that answered.
 
+The model defaults to `jev-latest`. Set `.model` in the client options or in
+the options of a single `ask` to pin a version.
+
 ## Errors
 
 HTTP statuses map to `Unauthorized`, `InvalidRequest`, `RateLimited`,
@@ -109,7 +112,8 @@ Connection failures, 429, 529 and 5xx are retried twice with exponential
 backoff and jitter. A server `Retry-After` is honoured. Configure this with
 `.retry` in the client options, or pass `.retry = .disabled`.
 
-A call blocks until the server answers or the `Io` cancels it.
+Set `.timeout` in the client options to bound each attempt. Without it a call
+blocks until the server answers or the `Io` cancels it.
 
 ## Testing
 

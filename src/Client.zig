@@ -23,6 +23,7 @@ uri: std.Uri,
 authorization: []u8,
 model: []u8,
 retry: Retry,
+timeout: ?Io.Duration,
 /// Replaces `http` when set before the first call. For tests.
 transport: ?Transport = null,
 
@@ -32,6 +33,9 @@ pub const Options = struct {
     base_url: []const u8 = "https://api.typesafe.ai",
     model: []const u8 = "jev-latest",
     retry: Retry = .{},
+    /// Bounds each attempt. Each attempt then runs on its own task, so `gpa`
+    /// must be thread-safe.
+    timeout: ?Io.Duration = null,
 };
 
 pub const AskOptions = struct {
@@ -57,6 +61,8 @@ pub const Error = error{
     UnexpectedStatus,
     /// See `Diagnostics.cause`.
     ConnectionFailed,
+    /// An attempt exceeded `Options.timeout`.
+    Timeout,
     Canceled,
     /// A 2xx body that the decoder rejected or that exceeds the size cap.
     InvalidResponse,
@@ -75,7 +81,7 @@ pub fn init(gpa: Allocator, io: Io, options: Options) InitError!Client {
     errdefer gpa.free(model);
     const http = try gpa.create(std.http.Client);
     http.* = .{ .allocator = gpa, .io = io };
-    return .{ .gpa = gpa, .io = io, .http = http, .url = url, .uri = uri, .authorization = authorization, .model = model, .retry = options.retry };
+    return .{ .gpa = gpa, .io = io, .http = http, .url = url, .uri = uri, .authorization = authorization, .model = model, .retry = options.retry, .timeout = options.timeout };
 }
 
 /// Every call must have returned.
@@ -112,27 +118,42 @@ fn send(self: *Client, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
         var out: Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
         var cause: ?anyerror = null;
-        const response: ?Transport.Response = t.send(request, &out.writer, &cause) catch |err| switch (err) {
-            error.Canceled, error.OutOfMemory, error.InvalidResponse => |e| return e,
-            error.ConnectionFailed => null,
-        };
+        const outcome = self.attempt(t, request, &out.writer, &cause);
         if (diagnostics) |d| {
             d.* = .{ .attempts = attempts, .cause = cause };
-            if (response) |r| {
+            if (outcome) |r| {
                 d.status = r.status;
                 d.retry_after_ms = r.retry_after_ms;
-            }
+            } else |_| {}
             d.setBody(out.written());
         }
-        const err = if (response) |r|
-            statusError(r.status) orelse return out.toOwnedSlice()
-        else
-            error.ConnectionFailed;
+        const err: Error = if (outcome) |r| statusError(r.status) orelse return out.toOwnedSlice() else |e| e;
         if (attempts > self.retry.max_retries or !retryable(err)) return err;
-        const retry_after_ms = if (response) |r| r.retry_after_ms else null;
+        const retry_after_ms = if (outcome) |r| r.retry_after_ms else |_| null;
         const ms = self.retry.delayMs(attempts - 1, retry_after_ms, jitter(self.io));
         if (ms > 0) try self.io.sleep(.fromMilliseconds(@intCast(ms)), .awake);
     }
+}
+
+/// Races the send against `timeout`. Falls back to a plain send when the `Io`
+/// cannot run a task concurrently.
+fn attempt(self: *Client, t: Transport, request: Transport.Request, out: *Io.Writer, cause: *?anyerror) (Transport.Error || error{Timeout})!Transport.Response {
+    const timeout = self.timeout orelse return t.send(request, out, cause);
+    const Race = union(enum) { sent: Transport.Error!Transport.Response, timer: Io.Cancelable!void };
+    var buffer: [2]Race = undefined;
+    var select: Io.Select(Race) = .init(self.io, &buffer);
+    select.concurrent(.sent, Transport.send, .{ t, request, out, cause }) catch return t.send(request, out, cause);
+    defer select.cancelDiscard();
+    const deadline: Io.Timeout = .{ .duration = .{ .raw = timeout, .clock = .awake } };
+    select.concurrent(.timer, Io.Timeout.sleep, .{ deadline, self.io }) catch {};
+    return switch (try select.await()) {
+        .sent => |sent| sent,
+        .timer => |slept| {
+            try slept;
+            cause.* = error.Timeout;
+            return error.Timeout;
+        },
+    };
 }
 
 fn statusError(status: std.http.Status) ?Error {
@@ -150,7 +171,7 @@ fn statusError(status: std.http.Status) ?Error {
 
 fn retryable(err: Error) bool {
     return switch (err) {
-        error.ConnectionFailed, error.RateLimited, error.Overloaded, error.ServerError => true,
+        error.ConnectionFailed, error.Timeout, error.RateLimited, error.Overloaded, error.ServerError => true,
         else => false,
     };
 }
@@ -168,7 +189,7 @@ const Mock = struct {
     replies: []const Reply,
     calls: usize = 0,
 
-    const Reply = struct { status: u10, body: []const u8 = "", retry_after_ms: ?u64 = null };
+    const Reply = struct { status: u10, body: []const u8 = "", retry_after_ms: ?u64 = null, delay_ms: i64 = 0 };
 
     fn reply(ctx: *anyopaque, request: Transport.Request, out: *Io.Writer, cause: *?anyerror) Transport.Error!Transport.Response {
         const self: *Mock = @ptrCast(@alignCast(ctx));
@@ -176,6 +197,7 @@ const Mock = struct {
         std.debug.assert(std.mem.eql(u8, "Bearer k", request.authorization));
         const next = self.replies[self.calls];
         self.calls += 1;
+        if (next.delay_ms > 0) try testing.io.sleep(.fromMilliseconds(next.delay_ms), .awake);
         if (next.status == 0) {
             cause.* = error.ConnectionRefused;
             return error.ConnectionFailed;
@@ -185,7 +207,7 @@ const Mock = struct {
     }
 
     fn client(self: *Mock, gpa: Allocator) !Client {
-        var c = try init(gpa, testing.io, .{ .api_key = "k", .base_url = "https://example.test/", .retry = .{ .initial_delay_ms = 0 } });
+        var c = try init(gpa, testing.io, .{ .api_key = "k", .base_url = "https://example.test/", .retry = .{ .initial_delay_ms = 0 }, .timeout = .fromMilliseconds(500) });
         c.transport = .{ .ctx = self, .sendFn = reply };
         return c;
     }
@@ -222,6 +244,20 @@ test "ask stops on a non-retryable status" {
     try testing.expectEqual(1, mock.calls);
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("http 401 after 1 attempt(s): {\"detail\":\"bad key\"}", try std.fmt.bufPrint(&buf, "{f}", .{d}));
+}
+
+test "ask times out an attempt" {
+    var mock: Mock = .{ .replies = &.{ .{ .status = 200, .delay_ms = 200 }, .{ .status = 200, .body = wire.response_fixture } } };
+    var c = try mock.client(testing.allocator);
+    defer c.deinit();
+    c.timeout = .fromMilliseconds(10);
+    var d: Diagnostics = .{};
+    _ = try c.ask("x", test_questions, .{ .diagnostics = &d });
+    try testing.expectEqual(2, d.attempts);
+    c.retry = .disabled;
+    mock.calls = 0;
+    try testing.expectError(error.Timeout, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectEqual(error.Timeout, d.cause.?);
 }
 
 test "ask survives allocation failure" {
