@@ -1,18 +1,25 @@
-//! By convention, root.zig is the root source file when making a package.
+//! Zig client for TypeSafe's System One API (the Jev model).
 const std = @import("std");
-const Io = std.Io;
 
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
-}
+pub const Client = @import("Client.zig");
+pub const Retry = @import("Retry.zig");
+pub const Diagnostics = @import("Diagnostics.zig");
+pub const Error = Client.Error;
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+const question = @import("question.zig");
+pub const noul = question.noul;
+pub const choice = question.choice;
+pub const score = question.score;
+pub const RawJson = question.RawJson;
 
-test "basic add functionality" {
-    try std.testing.expect(add(3, 7) == 10);
+const answer = @import("answer.zig");
+pub const NoulAnswer = answer.Noul;
+pub const ChoiceAnswer = answer.Choice;
+pub const ScoreAnswer = answer.Score;
+pub const Result = answer.Result;
+pub const Usage = answer.Usage;
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("wire.zig");
 }
