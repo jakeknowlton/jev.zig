@@ -118,8 +118,7 @@ blocks until the server answers or the `Io` cancels it.
 
 ## Testing
 
-Set `client.transport` to a `jev.Client.Transport` of your own to answer
-requests without a network.
+Point `.base_url` at a local server to test without calling TypeSafe.
 
 ## License
 

@@ -11,7 +11,7 @@ const Retry = @import("Retry.zig");
 const Diagnostics = @import("Diagnostics.zig");
 const Client = @This();
 
-pub const Transport = @import("transport.zig").Transport;
+const Transport = @import("transport.zig").Transport;
 
 gpa: Allocator,
 io: Io,
@@ -24,8 +24,6 @@ authorization: []u8,
 model: []u8,
 retry: Retry,
 timeout: ?Io.Duration,
-/// Replaces `http` when set before the first call. For tests.
-transport: ?Transport = null,
 
 pub const Options = struct {
     /// The client copies it and zeroes the copy at `deinit`.
@@ -97,7 +95,11 @@ pub fn deinit(self: *Client) void {
 
 /// `state` is a string or any value `std.json` can write. `questions` is a
 /// struct literal of `jev.noul`, `jev.choice` and `jev.score`.
-pub fn ask(self: *Client, state: anytype, questions: anytype, options: AskOptions) Error!answer.Result(@TypeOf(questions)) {
+pub fn ask(self: *const Client, state: anytype, questions: anytype, options: AskOptions) Error!answer.Result(@TypeOf(questions)) {
+    return self.askThrough(Transport.http(self.http), state, questions, options);
+}
+
+fn askThrough(self: *const Client, t: Transport, state: anytype, questions: anytype, options: AskOptions) Error!answer.Result(@TypeOf(questions)) {
     question.checkContent(@TypeOf(state), "state");
     var body: Io.Writer.Allocating = .init(self.gpa);
     defer body.deinit();
@@ -105,13 +107,12 @@ pub fn ask(self: *Client, state: anytype, questions: anytype, options: AskOption
         error.WriteFailed => return error.OutOfMemory,
         error.InvalidRequest => |e| return e,
     };
-    const response = try self.send(body.written(), options.diagnostics);
+    const response = try self.send(t, body.written(), options.diagnostics);
     defer self.gpa.free(response);
     return wire.decode(@TypeOf(questions), self.gpa, response);
 }
 
-fn send(self: *Client, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
-    const t = self.transport orelse Transport.http(self.http);
+fn send(self: *const Client, t: Transport, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
     const request: Transport.Request = .{ .uri = self.uri, .authorization = self.authorization, .body = body };
     var attempts: u16 = 1;
     while (true) : (attempts += 1) {
@@ -137,7 +138,7 @@ fn send(self: *Client, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
 
 /// Races the send against `timeout`. Falls back to a plain send when the `Io`
 /// cannot run a task concurrently.
-fn attempt(self: *Client, t: Transport, request: Transport.Request, out: *Io.Writer, cause: *?anyerror) (Transport.Error || error{Timeout})!Transport.Response {
+fn attempt(self: *const Client, t: Transport, request: Transport.Request, out: *Io.Writer, cause: *?anyerror) (Transport.Error || error{Timeout})!Transport.Response {
     const timeout = self.timeout orelse return t.send(request, out, cause);
     const Race = union(enum) { sent: Transport.Error!Transport.Response, timer: Io.Cancelable!void };
     var buffer: [2]Race = undefined;
@@ -222,10 +223,12 @@ const Mock = struct {
         return .{ .status = @enumFromInt(next.status), .retry_after_ms = next.retry_after_ms };
     }
 
-    fn client(self: *Mock, gpa: Allocator) !Client {
-        var c = try init(gpa, testing.io, .{ .api_key = "k", .base_url = "https://example.test/", .retry = .{ .initial_delay_ms = 0 }, .timeout = .fromMilliseconds(500) });
-        c.transport = .{ .ctx = self, .sendFn = reply };
-        return c;
+    fn client(gpa: Allocator) !Client {
+        return init(gpa, testing.io, .{ .api_key = "k", .base_url = "https://example.test/", .retry = .{ .initial_delay_ms = 0 }, .timeout = .fromMilliseconds(500) });
+    }
+
+    fn ask(self: *Mock, c: *const Client, state: anytype, questions: anytype, options: AskOptions) Error!answer.Result(@TypeOf(questions)) {
+        return c.askThrough(.{ .ctx = self, .sendFn = reply }, state, questions, options);
     }
 };
 
@@ -242,10 +245,10 @@ test ask {
         .{ .status = 529, .body = "busy", .retry_after_ms = 1 },
         .{ .status = 200, .body = wire.response_fixture },
     } };
-    var c = try mock.client(testing.allocator);
+    var c = try Mock.client(testing.allocator);
     defer c.deinit();
     var d: Diagnostics = .{};
-    const r = try c.ask("Charged twice", test_questions, .{ .diagnostics = &d });
+    const r = try mock.ask(&c, "Charged twice", test_questions, .{ .diagnostics = &d });
     try testing.expectEqual(.billing, r.answers.team.choice);
     try testing.expectEqual(.ok, d.status.?);
     try testing.expectEqual(3, d.attempts);
@@ -253,10 +256,10 @@ test ask {
 
 test "ask stops on a non-retryable status" {
     var mock: Mock = .{ .replies = &.{.{ .status = 401, .body = "{\"detail\":\"bad key\"}" }} };
-    var c = try mock.client(testing.allocator);
+    var c = try Mock.client(testing.allocator);
     defer c.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.Unauthorized, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectError(error.Unauthorized, mock.ask(&c, "x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(1, mock.calls);
     var buf: [64]u8 = undefined;
     try testing.expectEqualStrings("http 401 after 1 attempt(s): {\"detail\":\"bad key\"}", try std.fmt.bufPrint(&buf, "{f}", .{d}));
@@ -264,35 +267,35 @@ test "ask stops on a non-retryable status" {
 
 test "ask times out an attempt" {
     var mock: Mock = .{ .replies = &.{ .{ .status = 200, .delay_ms = 200 }, .{ .status = 200, .body = wire.response_fixture } } };
-    var c = try mock.client(testing.allocator);
+    var c = try Mock.client(testing.allocator);
     defer c.deinit();
     c.timeout = .fromMilliseconds(10);
     var d: Diagnostics = .{};
-    _ = try c.ask("x", test_questions, .{ .diagnostics = &d });
+    _ = try mock.ask(&c, "x", test_questions, .{ .diagnostics = &d });
     try testing.expectEqual(2, d.attempts);
     c.retry = .disabled;
     mock.calls = 0;
-    try testing.expectError(error.Timeout, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectError(error.Timeout, mock.ask(&c, "x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(error.Timeout, d.cause.?);
 }
 
 test "ask retries up to the maximum" {
     var mock: Mock = .{ .replies = &.{.{ .status = 0 }} };
-    var c = try mock.client(testing.allocator);
+    var c = try Mock.client(testing.allocator);
     defer c.deinit();
     c.retry = .{ .max_retries = 255, .initial_delay_ms = 0 };
     var d: Diagnostics = .{};
-    try testing.expectError(error.ConnectionFailed, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectError(error.ConnectionFailed, mock.ask(&c, "x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(256, mock.calls);
     try testing.expectEqual(256, d.attempts);
 }
 
 test "ask does not retry a failure that cannot clear" {
     var mock: Mock = .{ .replies = &.{.{ .status = 0, .cause = error.TlsInitializationFailed }} };
-    var c = try mock.client(testing.allocator);
+    var c = try Mock.client(testing.allocator);
     defer c.deinit();
     var d: Diagnostics = .{};
-    try testing.expectError(error.ConnectionFailed, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectError(error.ConnectionFailed, mock.ask(&c, "x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(1, mock.calls);
     try testing.expectEqual(error.TlsInitializationFailed, d.cause.?);
 }
@@ -302,9 +305,9 @@ test "ask survives allocation failure" {
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn run(gpa: Allocator, m: *Mock) !void {
             m.calls = 0;
-            var c = try m.client(gpa);
+            var c = try Mock.client(gpa);
             defer c.deinit();
-            _ = try c.ask("x", test_questions, .{});
+            _ = try m.ask(&c, "x", test_questions, .{});
         }
     }.run, .{&mock});
 }
