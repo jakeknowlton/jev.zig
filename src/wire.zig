@@ -238,3 +238,36 @@ test decode {
         return err;
     };
 }
+
+// Fuzz with `zig build test --fuzz -Doptimize=ReleaseSafe`. The Debug fuzz
+// runner does not compile on Zig 0.16.0.
+test "decode survives arbitrary bytes" {
+    try testing.fuzz({}, fuzzDecode, .{ .corpus = &.{response_fixture} });
+}
+
+fn fuzzDecode(_: void, smith: *testing.Smith) !void {
+    var buf: [4096]u8 = undefined;
+    const body = buf[0..smith.slice(&buf)];
+    const r = decode(@TypeOf(fixture_questions), testing.allocator, body) catch |err| switch (err) {
+        error.InvalidResponse => return,
+        error.OutOfMemory => return err,
+    };
+    try expectUnit(r.answers.urgent.probability);
+    try expectDistribution(&r.answers.team.probabilities.values, r.answers.team.confidence);
+    try expectDistribution(&r.answers.severity.probabilities.values, r.answers.severity.confidence);
+    try testing.expect(r.answers.severity.score >= 0 and r.answers.severity.score <= 2);
+}
+
+fn expectUnit(p: f64) !void {
+    try testing.expect(p >= 0 and p <= 1);
+}
+
+fn expectDistribution(probabilities: []const f64, confidence: f64) !void {
+    var sum: f64 = 0;
+    for (probabilities) |p| {
+        try expectUnit(p);
+        sum += p;
+    }
+    try testing.expect(@abs(sum - 1) <= tolerance);
+    try expectUnit(confidence);
+}
