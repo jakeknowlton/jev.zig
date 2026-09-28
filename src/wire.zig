@@ -69,7 +69,7 @@ pub fn decode(comptime Q: type, gpa: std.mem.Allocator, body: []const u8) Decode
     };
     const answers = member(root, "answers") orelse return error.InvalidResponse;
 
-    var result: answer.Result(Q) = .{ .answers = undefined };
+    var result: answer.Result(Q) = .{ .answers = undefined, .usage = undefined };
     inline for (@typeInfo(Q).@"struct".fields) |f| {
         const a = member(answers, f.name) orelse return error.InvalidResponse;
         if (member(a, "type")) |t| {
@@ -86,10 +86,11 @@ pub fn decode(comptime Q: type, gpa: std.mem.Allocator, body: []const u8) Decode
         @memcpy(result.model_buf[0..m.string.len], m.string);
         result.model_len = @intCast(m.string.len);
     };
-    if (member(root, "usage")) |u| {
-        result.usage.input_tokens = try count(member(u, "input_tokens"));
-        result.usage.output_tokens = try count(member(u, "output_tokens"));
-    }
+    const usage = member(root, "usage") orelse return error.InvalidResponse;
+    result.usage = .{
+        .input_tokens = try count(member(usage, "input_tokens")),
+        .output_tokens = try count(member(usage, "output_tokens")),
+    };
     return result;
 }
 
@@ -156,9 +157,8 @@ fn probability(v: ?Value) error{InvalidResponse}!f64 {
 }
 
 fn count(v: ?Value) error{InvalidResponse}!u64 {
-    return switch (v orelse return 0) {
+    return switch (v orelse return error.InvalidResponse) {
         .integer => |i| if (i < 0) error.InvalidResponse else @as(u64, @intCast(i)),
-        .null => 0,
         else => error.InvalidResponse,
     };
 }
@@ -211,7 +211,7 @@ test decode {
     try testing.expectEqual(296, r.usage.input_tokens);
 
     const minimal = try decode(Q, testing.allocator,
-        \\{"answers":{"urgent":{"noul":1},"team":{"choice":"sales","probabilities":{"sales":1.01},"confidence":1},"severity":{"score":2,"probabilities":{"2":1},"confidence":1}}}
+        \\{"answers":{"urgent":{"noul":1},"team":{"choice":"sales","probabilities":{"sales":1.01},"confidence":1},"severity":{"score":2,"probabilities":{"2":1},"confidence":1}},"usage":{"input_tokens":1,"output_tokens":1}}
     );
     try testing.expectEqual(1, minimal.answers.team.probabilities.get(.sales));
     try testing.expectEqualStrings("", minimal.model());
@@ -231,6 +231,8 @@ test decode {
         \\{"answers":{"urgent":{"noul":0.5},"team":{"choice":"sales","probabilities":{"sales":1},"confidence":1},"severity":{"score":7,"probabilities":{"2":1},"confidence":1}}}
         ,
         \\{"answers":{"urgent":{"noul":0.5},"team":{"choice":"sales","probabilities":{"sales":1},"confidence":1},"severity":{"score":2,"probabilities":{"2":0.5,"9":0.5},"confidence":1}}}
+        ,
+        \\{"answers":{"urgent":{"noul":1},"team":{"choice":"sales","probabilities":{"sales":1},"confidence":1},"severity":{"score":2,"probabilities":{"2":1},"confidence":1}},"usage":{"input_tokens":296,"output_tokens":"20"}}
     }, 0..) |body, i| testing.expectError(error.InvalidResponse, decode(Q, testing.allocator, body)) catch |err| {
         std.debug.print("case {d}\n", .{i});
         return err;

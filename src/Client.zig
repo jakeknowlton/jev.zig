@@ -128,7 +128,7 @@ fn send(self: *Client, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
             d.setBody(out.written());
         }
         const err: Error = if (outcome) |r| statusError(r.status) orelse return out.toOwnedSlice() else |e| e;
-        if (attempts > self.retry.max_retries or !retryable(err)) return err;
+        if (attempts > self.retry.max_retries or !retryable(err, cause)) return err;
         const retry_after_ms = if (outcome) |r| r.retry_after_ms else |_| null;
         const ms = self.retry.delayMs(attempts - 1, retry_after_ms, jitter(self.io));
         if (ms > 0) try self.io.sleep(.fromMilliseconds(@intCast(ms)), .awake);
@@ -171,9 +171,20 @@ fn statusError(status: std.http.Status) ?Error {
     };
 }
 
-fn retryable(err: Error) bool {
+/// A TLS failure or a malformed reply is a broken setup that a retry will hit again.
+fn retryable(err: Error, cause: ?anyerror) bool {
     return switch (err) {
-        error.ConnectionFailed, error.Timeout, error.RateLimited, error.Overloaded, error.ServerError => true,
+        error.ConnectionFailed => switch (cause orelse return true) {
+            error.TlsInitializationFailed,
+            error.CertificateBundleLoadFailure,
+            error.HttpHeadersInvalid,
+            error.HttpHeadersOversize,
+            error.HttpContentEncodingUnsupported,
+            error.HttpTransferEncodingUnsupported,
+            => false,
+            else => true,
+        },
+        error.Timeout, error.RateLimited, error.Overloaded, error.ServerError => true,
         else => false,
     };
 }
@@ -191,7 +202,7 @@ const Mock = struct {
     replies: []const Reply,
     calls: usize = 0,
 
-    const Reply = struct { status: u10, body: []const u8 = "", retry_after_ms: ?u64 = null, delay_ms: i64 = 0 };
+    const Reply = struct { status: u10, body: []const u8 = "", retry_after_ms: ?u64 = null, delay_ms: i64 = 0, cause: anyerror = error.ConnectionRefused };
 
     fn reply(ctx: *anyopaque, request: Transport.Request, out: *Io.Writer, cause: *?anyerror) Transport.Error!Transport.Response {
         const self: *Mock = @ptrCast(@alignCast(ctx));
@@ -204,7 +215,7 @@ const Mock = struct {
             return error.ConnectionFailed;
         };
         if (next.status == 0) {
-            cause.* = error.ConnectionRefused;
+            cause.* = next.cause;
             return error.ConnectionFailed;
         }
         out.writeAll(next.body) catch return error.OutOfMemory;
@@ -274,6 +285,16 @@ test "ask retries up to the maximum" {
     try testing.expectError(error.ConnectionFailed, c.ask("x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(256, mock.calls);
     try testing.expectEqual(256, d.attempts);
+}
+
+test "ask does not retry a failure that cannot clear" {
+    var mock: Mock = .{ .replies = &.{.{ .status = 0, .cause = error.TlsInitializationFailed }} };
+    var c = try mock.client(testing.allocator);
+    defer c.deinit();
+    var d: Diagnostics = .{};
+    try testing.expectError(error.ConnectionFailed, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectEqual(1, mock.calls);
+    try testing.expectEqual(error.TlsInitializationFailed, d.cause.?);
 }
 
 test "ask survives allocation failure" {

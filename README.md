@@ -108,8 +108,9 @@ const r = client.ask(state, questions, .{ .diagnostics = &diagnostics }) catch |
 
 ## Retries
 
-Connection failures, 429, 529 and 5xx are retried twice with exponential
-backoff and jitter. A server `Retry-After` is honoured. Configure this with
+Connection failures, timeouts, 429, 529 and 5xx are retried twice with
+exponential backoff and jitter. A server `Retry-After` is honored. TLS
+failures and malformed replies are reported immediately and not retried. Configure this with
 `.retry` in the client options, or pass `.retry = .disabled`.
 
 Set `.timeout` in the client options to bound each attempt. Without it a call

@@ -31,8 +31,8 @@ pub fn Score(comptime E: type) type {
 }
 
 pub const Usage = struct {
-    input_tokens: u64 = 0,
-    output_tokens: u64 = 0,
+    input_tokens: u64,
+    output_tokens: u64,
 };
 
 /// The answers struct with one field per question.
@@ -55,7 +55,7 @@ pub fn Answers(comptime Q: type) type {
 pub fn Result(comptime Q: type) type {
     return struct {
         answers: Answers(Q),
-        usage: Usage = .{},
+        usage: Usage,
         model_buf: [64]u8 = undefined,
         model_len: u8 = 0,
 
