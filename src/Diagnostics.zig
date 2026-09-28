@@ -4,7 +4,7 @@ const Diagnostics = @This();
 
 status: ?std.http.Status = null,
 /// Number of HTTP attempts. The first request counts as one.
-attempts: u8 = 0,
+attempts: u16 = 0,
 retry_after_ms: ?u64 = null,
 /// The error behind `ConnectionFailed` or `Timeout`.
 cause: ?anyerror = null,

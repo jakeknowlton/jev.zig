@@ -113,7 +113,7 @@ pub fn ask(self: *Client, state: anytype, questions: anytype, options: AskOption
 fn send(self: *Client, body: []u8, diagnostics: ?*Diagnostics) Error![]u8 {
     const t = self.transport orelse Transport.http(self.http);
     const request: Transport.Request = .{ .uri = self.uri, .authorization = self.authorization, .body = body };
-    var attempts: u8 = 1;
+    var attempts: u16 = 1;
     while (true) : (attempts += 1) {
         var out: Io.Writer.Allocating = .init(self.gpa);
         defer out.deinit();
@@ -146,7 +146,9 @@ fn attempt(self: *Client, t: Transport, request: Transport.Request, out: *Io.Wri
     defer select.cancelDiscard();
     const deadline: Io.Timeout = .{ .duration = .{ .raw = timeout, .clock = .awake } };
     select.concurrent(.timer, Io.Timeout.sleep, .{ deadline, self.io }) catch {};
-    return switch (try select.await()) {
+    const first = try select.await();
+    select.cancelDiscard();
+    return switch (first) {
         .sent => |sent| sent,
         .timer => |slept| {
             try slept;
@@ -195,9 +197,12 @@ const Mock = struct {
         const self: *Mock = @ptrCast(@alignCast(ctx));
         std.debug.assert(std.mem.eql(u8, "example.test", request.uri.host.?.percent_encoded));
         std.debug.assert(std.mem.eql(u8, "Bearer k", request.authorization));
-        const next = self.replies[self.calls];
+        const next = self.replies[@min(self.calls, self.replies.len - 1)];
         self.calls += 1;
-        if (next.delay_ms > 0) try testing.io.sleep(.fromMilliseconds(next.delay_ms), .awake);
+        if (next.delay_ms > 0) testing.io.sleep(.fromMilliseconds(next.delay_ms), .awake) catch {
+            cause.* = error.ConnectionResetByPeer;
+            return error.ConnectionFailed;
+        };
         if (next.status == 0) {
             cause.* = error.ConnectionRefused;
             return error.ConnectionFailed;
@@ -258,6 +263,17 @@ test "ask times out an attempt" {
     mock.calls = 0;
     try testing.expectError(error.Timeout, c.ask("x", test_questions, .{ .diagnostics = &d }));
     try testing.expectEqual(error.Timeout, d.cause.?);
+}
+
+test "ask retries up to the maximum" {
+    var mock: Mock = .{ .replies = &.{.{ .status = 0 }} };
+    var c = try mock.client(testing.allocator);
+    defer c.deinit();
+    c.retry = .{ .max_retries = 255, .initial_delay_ms = 0 };
+    var d: Diagnostics = .{};
+    try testing.expectError(error.ConnectionFailed, c.ask("x", test_questions, .{ .diagnostics = &d }));
+    try testing.expectEqual(256, mock.calls);
+    try testing.expectEqual(256, d.attempts);
 }
 
 test "ask survives allocation failure" {

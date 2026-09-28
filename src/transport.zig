@@ -58,7 +58,7 @@ fn httpSend(ctx: *anyopaque, request: Transport.Request, body_out: *Io.Writer, c
         if (std.ascii.eqlIgnoreCase(h.name, "retry-after-ms")) {
             retry_after_ms = std.fmt.parseInt(u64, h.value, 10) catch continue;
         } else if (std.ascii.eqlIgnoreCase(h.name, "retry-after") and retry_after_ms == null) {
-            retry_after_ms = (std.fmt.parseInt(u64, h.value, 10) catch continue) * 1000;
+            retry_after_ms = (std.fmt.parseInt(u64, h.value, 10) catch continue) *| 1000;
         }
     }
     const status = response.head.status;
@@ -132,6 +132,6 @@ fn serveOnce(listener: *Io.net.Server, io: Io) !void {
     try testing.expectEqualStrings("{\"a\":1}", &body);
     try request.respond("busy", .{
         .status = .too_many_requests,
-        .extra_headers = &.{ .{ .name = "retry-after-ms", .value = "7" }, .{ .name = "retry-after", .value = "2" } },
+        .extra_headers = &.{ .{ .name = "retry-after", .value = "18446744073709551615" }, .{ .name = "retry-after-ms", .value = "7" } },
     });
 }

@@ -13,6 +13,7 @@ const tolerance = 0.05;
 pub fn encode(w: *Io.Writer, state: anytype, questions: anytype, model: []const u8) EncodeError!void {
     try validate(state);
     try validate(questions);
+    try validate(model);
     var s: std.json.Stringify = .{ .writer = w };
     try s.beginObject();
     try s.objectField("state");
@@ -27,6 +28,16 @@ pub fn encode(w: *Io.Writer, state: anytype, questions: anytype, model: []const 
 /// `std.json` writes invalid UTF-8 as a number array and non-finite floats as
 /// bare words. This rejects both before encoding.
 fn validate(v: anytype) error{InvalidRequest}!void {
+    if (@TypeOf(v) == Value) return switch (v) {
+        .string, .number_string => |s| validate(s),
+        .float => |f| validate(f),
+        .array => |a| for (a.items) |x| try validate(x),
+        .object => |o| for (o.keys(), o.values()) |k, x| {
+            try validate(k);
+            try validate(x);
+        },
+        else => {},
+    };
     switch (@typeInfo(@TypeOf(v))) {
         .@"struct" => |s| inline for (s.fields) |f| try validate(@field(v, f.name)),
         .optional => if (v) |p| try validate(p),
@@ -174,6 +185,8 @@ test encode {
 
     try testing.expectError(error.InvalidRequest, encode(&out.writer, "\xff", fixture_questions, "jev-latest"));
     try testing.expectError(error.InvalidRequest, encode(&out.writer, .{ .x = std.math.nan(f64) }, fixture_questions, "jev-latest"));
+    try testing.expectError(error.InvalidRequest, encode(&out.writer, std.json.Value{ .string = "\xff" }, fixture_questions, "jev-latest"));
+    try testing.expectError(error.InvalidRequest, encode(&out.writer, "x", fixture_questions, "\xff"));
 }
 
 pub const response_fixture =
